@@ -5,13 +5,10 @@
  */
 
 $page_title = 'Pembayaran Kolektif';
+require_once '../../config/app.php';
+require_once '../../config/database.php';
+requirePaymentAccess();
 require_once '../../includes/header.php';
-
-// Block kepala_tpq from accessing this page
-if ($_SESSION['level'] == 'kepala_tpq') {
-    header("Location: ../laporan/index.php");
-    exit;
-}
 
 require_once '../../includes/sidebar.php';
 require_once '../../includes/topbar.php';
@@ -27,15 +24,35 @@ $filter_kelas_raw = isset($_GET['kelas']) ? sanitize($_GET['kelas']) : '';
 $is_all_kelas = ($filter_kelas_raw === 'all' || $filter_kelas_raw === '0');
 $filter_kelas = $is_all_kelas ? 0 : (int) $filter_kelas_raw;
 $filter_mode = isset($_GET['mode']) ? sanitize($_GET['mode']) : 'bulanan';
+$class_scope = paymentClassScope('id_kelas');
+$santri_scope = paymentClassScope();
+if ($filter_kelas > 0) {
+    $allowed_class = mysqli_query($conn, "SELECT id_kelas FROM kelas WHERE id_kelas = $filter_kelas AND $class_scope");
+    if (mysqli_num_rows($allowed_class) !== 1) {
+        http_response_code(403);
+        exit('Kelas ini tidak ditugaskan kepada Anda.');
+    }
+}
 
 // Handle POST request (Step 2 - Submit Pembayaran)
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
+    if (!paymentCsrfValid()) {
+        http_response_code(403);
+        exit('Sesi formulir tidak valid. Muat ulang halaman sebelum menyimpan.');
+    }
+    foreach (['pilih_item', 'bulan_dibayar', 'bulan_akhir', 'tahun_dibayar', 'jumlah_bayar', 'pilih_santri'] as $field) {
+        if (isset($_POST[$field]) && (!is_array($_POST[$field]) || count(array_filter($_POST[$field], 'is_array')) > 0)) {
+            http_response_code(400);
+            exit('Data formulir tidak valid.');
+        }
+    }
     $tgl_bayar = date('Y-m-d');
     $metode_bayar = 'tunai';
-    $keterangan = sanitize($_POST['keterangan'] ?? '');
+    $keterangan = trim($_POST['keterangan'] ?? '');
     $id_user = (int) $_SESSION['id_user'];
 
-    $pilih_santri = $_POST['pilih_santri'] ?? [];
+    $pilih_santri = array_values(array_unique(array_map('intval', $_POST['pilih_santri'] ?? [])));
+    sort($pilih_santri, SORT_NUMERIC);
     
     // Items data
     $pilih_item = $_POST['pilih_item'] ?? [];
@@ -47,6 +64,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
     // Inherited mode
     $mode = strtolower(sanitize($_POST['mode_pembayaran'] ?? 'tahunan'));
 
+    if (!in_array($mode, ['bulanan', 'tahunan'], true) || $mode !== $filter_mode || (!$is_all_kelas && $filter_kelas <= 0)) {
+        $errors[] = 'Pilih kelas dan mode pembayaran yang valid terlebih dahulu.';
+    }
     if (empty($pilih_santri)) {
         $errors[] = 'Pilih minimal 1 santri untuk diproses pembayarannya!';
     }
@@ -72,11 +92,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
             $detail_items = [];
             foreach ($pilih_item as $id_iuran_raw => $val) {
                 $id_iuran = (int) $id_iuran_raw;
-                if ($id_iuran <= 0 || !isset($iuran_map[$id_iuran])) continue;
+                if ($id_iuran <= 0 || !isset($iuran_map[$id_iuran])) {
+                    throw new RuntimeException('Iuran tidak valid.');
+                }
 
                 $iuran = $iuran_map[$id_iuran];
                 $periode_tipe = isset($iuran['periode_tipe']) && $iuran['periode_tipe'] === 'tahunan' ? 'tahunan' : 'bulanan';
                 
+                if ($periode_tipe !== $mode) {
+                    throw new RuntimeException('Iuran tidak sesuai mode pembayaran.');
+                }
                 $jumlah_raw = str_replace(['.', ','], '', (string) ($jumlah_bayar[$id_iuran] ?? '0'));
                 $jumlah = (float) $jumlah_raw;
                 if ($jumlah <= 0) {
@@ -84,6 +109,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
                 }
 
                 $tahun = sanitize($tahun_dibayar[$id_iuran] ?? '');
+                if (!preg_match('/^20[0-9]{2}$|^2100$/', $tahun)) {
+                    throw new RuntimeException('Tahun pembayaran tidak valid.');
+                }
                 $bulan_awal = $periode_tipe === 'bulanan' ? sanitize($bulan_dibayar[$id_iuran] ?? '') : '-';
                 $bulan_akhir = $periode_tipe === 'bulanan' ? sanitize($bulan_akhir_dibayar[$id_iuran] ?? '') : '';
 
@@ -95,7 +123,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
                     $idx_akhir = empty($bulan_akhir) ? $idx_awal : array_search($bulan_akhir, $semua_bulan);
                     
                     if ($idx_awal === false || $idx_akhir === false || $idx_akhir < $idx_awal) {
-                        $bulan_list_process = [$bulan_awal];
+                        throw new RuntimeException('Rentang bulan pembayaran tidak valid.');
                     } else {
                         for ($i = $idx_awal; $i <= $idx_akhir; $i++) {
                             $bulan_list_process[] = $semua_bulan[$i];
@@ -130,12 +158,25 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
             // Execute for each Santri
             foreach ($pilih_santri as $id_santri_raw) {
                 $id_santri = (int) $id_santri_raw;
-                if ($id_santri <= 0) continue;
+                mysqli_query($conn, "SELECT id_santri FROM santri WHERE id_santri = $id_santri FOR UPDATE");
+                if (!paymentSantriAllowed($id_santri)) {
+                    throw new RuntimeException('Santri tidak aktif atau kelas santri tidak ditugaskan kepada Anda.');
+                }
+                if (!$is_all_kelas) {
+                    $student = mysqli_fetch_assoc(mysqli_query($conn, "SELECT id_kelas FROM santri WHERE id_santri = $id_santri"));
+                    if ((int) $student['id_kelas'] !== $filter_kelas) {
+                        throw new RuntimeException('Santri tidak termasuk kelas yang dipilih.');
+                    }
+                }
+                $assigned_fees = paymentSantriFees($id_santri);
                 
                 $santri_processed = false;
 
                 foreach ($detail_items as $item) {
                     $id_iuran = $item['id_iuran'];
+                    if (!isset($assigned_fees[$id_iuran])) {
+                        throw new RuntimeException("Iuran belum ditetapkan admin untuk santri ID $id_santri. Pilih santri dengan iuran yang sama.");
+                    }
                     $periode_key = $item['periode_key'];
                     $jumlah = $item['jumlah'];
                     $nominal = (float) $item['iuran_info']['nominal'];
@@ -159,7 +200,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
 
                     $insert_detail = "INSERT INTO pembayaran (id_user, id_santri, tgl_bayar, periode_tipe, periode_key, bulan_dibayar, tahun_dibayar, id_iuran, jumlah_bayar, metode_bayar, keterangan)
                                       VALUES ('$id_user', '$id_santri', '$tgl_bayar', '" . $item['periode_tipe'] . "', '" . mysqli_real_escape_string($conn, $periode_key) . "', '" . mysqli_real_escape_string($conn, $item['bulan']) . "', '" . mysqli_real_escape_string($conn, $item['tahun']) . "', '$id_iuran', '$jumlah', '$metode_bayar', '" . mysqli_real_escape_string($conn, $keterangan) . "')";
-                    mysqli_query($conn, $insert_detail);
+                    if (!mysqli_query($conn, $insert_detail)) {
+                        throw new RuntimeException('Gagal menyimpan rincian pembayaran.');
+                    }
                     
                     $last_insert_id = mysqli_insert_id($conn);
                     logActivity("Pembayaran kolektif", 'pembayaran', $last_insert_id);
@@ -182,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
             $success_count = $count_success_santri;
             $success_items = $count_success_items;
             
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             mysqli_rollback($conn);
             $errors[] = 'Gagal menyimpan pembayaran kolektif: ' . $e->getMessage();
         }
@@ -190,7 +233,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_bulk'])) {
 }
 
 // Prepare data for forms
-$kelas_list = mysqli_query($conn, 'SELECT * FROM kelas ORDER BY nama_kelas');
+$kelas_list = mysqli_query($conn, "SELECT * FROM kelas WHERE $class_scope ORDER BY nama_kelas");
 $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 
 // Get Santri list
@@ -204,7 +247,7 @@ if ($filter_kelas > 0 || $is_all_kelas) {
             SELECT s.id_santri, s.nama, s.status, k.nama_kelas
             FROM santri s
             JOIN kelas k ON s.id_kelas = k.id_kelas
-            WHERE s.status = 'active'
+            WHERE s.status = 'active' AND $santri_scope
             ORDER BY k.nama_kelas ASC, s.nama ASC
         ");
     } else {
@@ -218,7 +261,7 @@ if ($filter_kelas > 0 || $is_all_kelas) {
         $qs = mysqli_query($conn, "
             SELECT id_santri, nama, status
             FROM santri
-            WHERE id_kelas = '$filter_kelas' AND status = 'active'
+            WHERE id_kelas = '$filter_kelas' AND status = 'active' AND $class_scope
             ORDER BY nama ASC
         ");
     }
@@ -253,13 +296,14 @@ if ($filter_kelas > 0 || $is_all_kelas) {
 </header>
 
 <div class="container-xl px-4 mt-4">
+    <?php paymentScopeNotice(); ?>
 
     <?php if (!empty($errors)): ?>
         <script>
             Swal.fire({
                 icon: 'error',
                 title: 'Terjadi Kesalahan!',
-                html: '<?php echo addslashes(implode('<br>', $errors)); ?>',
+                text: <?php echo json_encode(implode("\n", $errors), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
                 showConfirmButton: true
             });
         </script>
@@ -292,7 +336,7 @@ if ($filter_kelas > 0 || $is_all_kelas) {
                         <label>Pilih Kelas <span class="text-danger">*</span></label>
                         <select name="kelas" class="form-control" required>
                             <option value="">-- Pilih Kelas --</option>
-                            <option value="all" <?php echo $is_all_kelas ? 'selected' : ''; ?>>Semua Kelas</option>
+                            <option value="all" <?php echo $is_all_kelas ? 'selected' : ''; ?>>Semua Kelas yang Diizinkan</option>
                             <?php while ($kls = mysqli_fetch_assoc($kelas_list)): ?>
                                 <option value="<?php echo $kls['id_kelas']; ?>" <?php echo $filter_kelas == $kls['id_kelas'] ? 'selected' : ''; ?>>
                                     <?php echo htmlspecialchars($kls['nama_kelas']); ?>
@@ -332,6 +376,7 @@ if ($filter_kelas > 0 || $is_all_kelas) {
                     </div>
                 <?php else: ?>
                     <form method="POST" action="" id="formBulkPayment">
+                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars(paymentCsrfToken()); ?>">
                         <input type="hidden" name="mode_pembayaran" value="<?php echo htmlspecialchars($filter_mode); ?>">
 
                         <div class="row">
@@ -339,7 +384,7 @@ if ($filter_kelas > 0 || $is_all_kelas) {
                             <div class="col-lg-6 mb-4">
                                 <div class="card bg-light h-100">
                                     <div class="card-body">
-                                        <h6 class="font-weight-bold mb-3"><i class="fas fa-list-check mr-2"></i>Pilih Tagihan (Berlaku Semua)</h6>
+                                        <h6 class="font-weight-bold mb-3"><i class="fas fa-list-check mr-2"></i>Pilih Tagihan (Harus aktif untuk setiap santri terpilih)</h6>
                                         <div id="tagihanContainer" class="mb-3">
                                             <div class="text-center text-muted">Akan memuat tagihan...</div>
                                         </div>
