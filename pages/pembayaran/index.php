@@ -11,23 +11,21 @@ if (session_status() === PHP_SESSION_NONE) {
 require_once '../../config/app.php';
 require_once '../../config/database.php';
 
-// Check login
-if (!isset($_SESSION['login'])) {
-    header("Location: ../../login.php");
-    exit;
-}
-
-// Block kepala_tpq from accessing this page
-if ($_SESSION['level'] == 'kepala_tpq') {
-    header("Location: ../../index.php");
-    exit;
-}
+requirePaymentAccess();
+$class_scope = paymentClassScope('id_kelas');
+$santri_scope = paymentClassScope();
 
 // Handle delete pembayaran
 if (isset($_GET['delete'])) {
     $id = (int) sanitize($_GET['delete']);
 
-    if (mysqli_query($conn, "DELETE FROM pembayaran WHERE id_pembayaran = '$id'")) {
+    $target = mysqli_fetch_assoc(mysqli_query($conn, "SELECT id_santri FROM pembayaran WHERE id_pembayaran = $id"));
+    if (!$target || !paymentSantriAllowed($target['id_santri'], false)) {
+        http_response_code(403);
+        exit('Pembayaran tidak ditemukan atau kelas tidak ditugaskan kepada Anda.');
+    }
+    if (mysqli_query($conn, "DELETE p FROM pembayaran p JOIN santri s ON s.id_santri = p.id_santri
+        WHERE p.id_pembayaran = $id AND $santri_scope")) {
         logActivity('Menghapus data pembayaran', 'pembayaran', $id);
         setFlash('success', 'Data pembayaran berhasil dihapus!');
     } else {
@@ -58,7 +56,7 @@ $periode_end = date('Y-m-d', strtotime($periode_start . ' +1 month'));
 // Date-range filter (instead of MONTH()/YEAR()) so idx_pembayaran_tgl_bayar can be used.
 // (Still used here for the two summary cards below; the table itself now
 // loads via AJAX from api/datatable_pembayaran.php using the same filters.)
-$where = "WHERE p.tgl_bayar >= '$periode_start' AND p.tgl_bayar < '$periode_end'";
+$where = "WHERE p.tgl_bayar >= '$periode_start' AND p.tgl_bayar < '$periode_end' AND $santri_scope";
 if (!empty($filter_kelas)) {
     $where .= " AND s.id_kelas = " . (int) $filter_kelas;
 }
@@ -73,7 +71,7 @@ $total = mysqli_fetch_assoc(mysqli_query($conn, "
     $where
 "));
 
-$kelas_list = mysqli_query($conn, 'SELECT * FROM kelas ORDER BY nama_kelas');
+$kelas_list = mysqli_query($conn, "SELECT * FROM kelas WHERE $class_scope ORDER BY nama_kelas");
 $iuran_list = mysqli_query($conn, 'SELECT * FROM iuran ORDER BY nama_iuran ASC, tahun DESC');
 
 $bulan_list = [
@@ -122,6 +120,7 @@ $bulan_list = [
 
 <!-- Begin Page Content -->
 <div class="container-xl px-4 mt-4">
+    <?php paymentScopeNotice(); ?>
 
     <div class="collapse mb-4 <?php echo (!empty($_GET['bulan']) || !empty($_GET['tahun']) || !empty($_GET['kelas']) || !empty($_GET['iuran'])) ? 'show' : ''; ?>"
         id="collapseFilter">
