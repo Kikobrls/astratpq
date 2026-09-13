@@ -299,29 +299,20 @@ if ($filter_kelas > 0 || $is_all_kelas) {
     <?php paymentScopeNotice(); ?>
 
     <?php if (!empty($errors)): ?>
-        <script>
-            Swal.fire({
-                icon: 'error',
-                title: 'Terjadi Kesalahan!',
-                text: <?php echo json_encode(implode("\n", $errors), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
-                showConfirmButton: true
-            });
-        </script>
+        <div class="alert alert-danger" role="alert">
+            <strong>Pembayaran belum tersimpan.</strong>
+            <?php foreach ($errors as $error): ?>
+                <div><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
+            <?php endforeach; ?>
+        </div>
     <?php endif; ?>
 
     <?php if ($success): ?>
-        <script>
-            Swal.fire({
-                icon: 'success',
-                title: 'Pembayaran Berhasil!',
-                html: '<p>Pembayaran kolektif multi-tagihan berhasil disimpan untuk <strong><?php echo (int) $success_count; ?></strong> santri.</p><p>Jumlah Item Transaksi Tersimpan: <strong><?php echo (int) $success_items; ?></strong></p>',
-                showCancelButton: false,
-                confirmButtonText: 'Kembali ke Daftar',
-                confirmButtonColor: '#3085d6'
-            }).then((result) => {
-                window.location.href = 'index.php';
-            });
-        </script>
+        <div class="alert alert-success" role="status">
+            <strong>Pembayaran kolektif berhasil disimpan.</strong>
+            <?php echo (int) $success_count; ?> santri, <?php echo (int) $success_items; ?> item transaksi.
+            <a href="index.php">Lihat riwayat pembayaran</a>
+        </div>
     <?php endif; ?>
 
     <!-- STEP 1: Filter Form -->
@@ -461,6 +452,11 @@ if ($filter_kelas > 0 || $is_all_kelas) {
 <?php
 $extra_js = '
 <script>
+function escapePaymentHtml(value) {
+    const element = document.createElement("span");
+    element.textContent = String(value == null ? "" : value);
+    return element.innerHTML;
+}
     const filterKelas = "' . addslashes($filter_kelas_raw) . '";
     const filterMode = "' . htmlspecialchars($filter_mode) . '";
     const bulanList = ' . json_encode($bulan_list) . ';
@@ -517,7 +513,7 @@ $extra_js = '
                         <div class="custom-control custom-checkbox mb-1">
                             <input type="checkbox" class="custom-control-input item-check" id="check_${item.id_iuran}" name="pilih_item[${item.id_iuran}]" value="1" data-id="${item.id_iuran}" checked>
                             <label class="custom-control-label font-weight-bold text-dark" for="check_${item.id_iuran}">
-                                ${item.nama_iuran}
+                                ${escapePaymentHtml(item.nama_iuran)}
                             </label>
                         </div>
                         <div class="small text-muted mb-2 ml-4">Nominal Tagihan: ${formatRupiahJs(item.nominal)}</div>
@@ -582,7 +578,7 @@ $extra_js = '
                         if (data.status === "success" && Array.isArray(data.data)) {
                             renderTagihan(data.data, filterMode);
                         } else {
-                            document.getElementById("tagihanContainer").innerHTML = `<div class="text-danger small">${data.message || "Gagal memuat tagihan."}</div>`;
+                            document.getElementById("tagihanContainer").innerHTML = `<div class="text-danger small">${escapePaymentHtml(data.message || "Gagal memuat tagihan.")}</div>`;
                         }
                     })
                     .catch(() => {
@@ -614,22 +610,14 @@ $extra_js = '
                 const checkedSantri = document.querySelectorAll(".santri-check:checked").length;
                 if (checkedSantri === 0) {
                     e.preventDefault();
-                    Swal.fire({
-                        icon: "warning",
-                        title: "Pilih Santri",
-                        text: "Silakan centang minimal 1 santri untuk diproses!"
-                    });
+                    window.alert("Silakan centang minimal 1 santri untuk diproses!");
                     return;
                 }
 
                 const checkedItems = document.querySelectorAll(".item-check:checked").length;
                 if (checkedItems === 0) {
                     e.preventDefault();
-                    Swal.fire({
-                        icon: "warning",
-                        title: "Pilih Tagihan",
-                        text: "Silakan centang minimal 1 tagihan/iuran di sebelah kiri!"
-                    });
+                    window.alert("Silakan centang minimal 1 tagihan/iuran di sebelah kiri!");
                     return;
                 }
             });
