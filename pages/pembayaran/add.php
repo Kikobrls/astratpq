@@ -5,13 +5,10 @@
  */
 
 $page_title = 'Input Pembayaran';
+require_once '../../config/app.php';
+require_once '../../config/database.php';
+requirePaymentAccess();
 require_once '../../includes/header.php';
-
-// Block kepala_tpq from accessing this page
-if ($_SESSION['level'] == 'kepala_tpq') {
-    header("Location: ../laporan/index.php");
-    exit;
-}
 
 require_once '../../includes/sidebar.php';
 require_once '../../includes/topbar.php';
@@ -23,13 +20,23 @@ $success_info = null;
 // Handle form submission
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $id_santri = (int) ($_POST['id_santri'] ?? 0);
+    if (!paymentCsrfValid()) {
+        http_response_code(403);
+        exit('Sesi formulir tidak valid. Muat ulang halaman sebelum menyimpan.');
+    }
+    foreach (['pilih_item', 'bulan_dibayar', 'bulan_akhir', 'tahun_dibayar', 'jumlah_bayar'] as $field) {
+        if (isset($_POST[$field]) && (!is_array($_POST[$field]) || count(array_filter($_POST[$field], 'is_array')) > 0)) {
+            http_response_code(400);
+            exit('Data formulir tidak valid.');
+        }
+    }
     $tgl_bayar = date('Y-m-d');
     $mode = strtolower(sanitize($_POST['mode'] ?? 'tahunan'));
     if ($mode !== 'bulanan' && $mode !== 'tahunan') {
         $mode = 'tahunan';
     }
     $metode_bayar = 'tunai';
-    $keterangan = sanitize($_POST['keterangan'] ?? '');
+    $keterangan = trim($_POST['keterangan'] ?? '');
     $id_user = (int) $_SESSION['id_user'];
 
     $pilih_item = $_POST['pilih_item'] ?? [];
@@ -46,37 +53,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $errors[] = 'Pilih minimal 1 tagihan untuk dibayar!';
     }
 
-    $iuran_map = [];
-    if (empty($errors)) {
-        $hasPeriodeTipe = appColumnExists('iuran', 'periode_tipe');
-        $periodeExpr = $hasPeriodeTipe ? "IFNULL(b.periode_tipe, 'bulanan')" : "'bulanan'";
-
-        if (appTableExists('santri_iuran')) {
-            $q = "SELECT b.id_iuran, b.nama_iuran, b.nominal, $periodeExpr as periode_tipe
-                  FROM santri_iuran sb
-                  JOIN iuran b ON sb.id_iuran = b.id_iuran
-                  WHERE sb.id_santri = '$id_santri' AND sb.is_active = 1";
-            $r = mysqli_query($conn, $q);
-            if ($r) {
-                while ($row = mysqli_fetch_assoc($r)) {
-                    $iuran_map[(int) $row['id_iuran']] = $row;
-                }
-            }
-        }
-
-        // fallback legacy if relation table not available/empty
-        if (empty($iuran_map)) {
-            $q = "SELECT b.id_iuran, b.nama_iuran, b.nominal,
-                         $periodeExpr as periode_tipe
-                  FROM santri s
-                  JOIN iuran b ON s.id_iuran = b.id_iuran
-                  WHERE s.id_santri = '$id_santri'";
-            $r = mysqli_query($conn, $q);
-            while ($row = mysqli_fetch_assoc($r)) {
-                $iuran_map[(int) $row['id_iuran']] = $row;
-            }
-        }
+    if (!paymentSantriAllowed($id_santri)) {
+        $errors[] = 'Santri tidak aktif atau kelas santri tidak ditugaskan kepada Anda.';
     }
+    $iuran_map = empty($errors) ? paymentSantriFees($id_santri) : [];
 
     $detail_items = [];
     $grand_total = 0;
@@ -107,7 +87,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 continue;
             }
 
-            if (empty($tahun)) {
+            if (!preg_match('/^20[0-9]{2}$|^2100$/', $tahun)) {
                 $errors[] = 'Tahun dibayar untuk ' . $iuran['nama_iuran'] . ' harus diisi.';
                 continue;
             }
@@ -120,7 +100,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $idx_akhir = empty($bulan_akhir) ? $idx_awal : array_search($bulan_akhir, $semua_bulan);
                 
                 if ($idx_awal === false || $idx_akhir === false || $idx_akhir < $idx_awal) {
-                    $bulan_list_process = [$bulan_awal];
+                    $errors[] = 'Rentang bulan pembayaran tidak valid.';
+                    continue;
                 } else {
                     for ($i = $idx_awal; $i <= $idx_akhir; $i++) {
                         $bulan_list_process[] = $semua_bulan[$i];
@@ -174,11 +155,26 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         mysqli_begin_transaction($conn);
         try {
 
+            // Serialize payments for this santri, then recheck scope and balance.
+            mysqli_query($conn, "SELECT id_santri FROM santri WHERE id_santri = $id_santri FOR UPDATE");
+            $current_fees = paymentSantriFees($id_santri);
             $last_insert_id = 0;
             foreach ($detail_items as $item) {
+                $fee_id = (int) $item['id_iuran'];
+                if (!isset($current_fees[$fee_id]) || $current_fees[$fee_id]['periode_tipe'] !== $item['periode_tipe']) {
+                    throw new RuntimeException('Penugasan kelas atau iuran telah berubah. Muat ulang halaman.');
+                }
+                $period_key = mysqli_real_escape_string($conn, $item['periode_key']);
+                $paid = mysqli_fetch_assoc(mysqli_query($conn, "SELECT COALESCE(SUM(jumlah_bayar), 0) AS total FROM pembayaran
+                    WHERE id_santri = $id_santri AND id_iuran = $fee_id AND periode_key = '$period_key'"));
+                if ((float) $paid['total'] + $item['jumlah_bayar'] > (float) $current_fees[$fee_id]['nominal']) {
+                    throw new RuntimeException('Pembayaran melebihi sisa tagihan. Muat ulang halaman.');
+                }
                 $insert_detail = "INSERT INTO pembayaran (id_user, id_santri, tgl_bayar, periode_tipe, periode_key, bulan_dibayar, tahun_dibayar, id_iuran, jumlah_bayar, metode_bayar, keterangan)
                                   VALUES ('$id_user', '$id_santri', '$tgl_bayar', '" . $item['periode_tipe'] . "', '" . mysqli_real_escape_string($conn, $item['periode_key']) . "', '" . mysqli_real_escape_string($conn, $item['bulan_dibayar']) . "', '" . mysqli_real_escape_string($conn, $item['tahun_dibayar']) . "', '" . $item['id_iuran'] . "', '" . $item['jumlah_bayar'] . "', '$metode_bayar', '" . mysqli_real_escape_string($conn, $item['keterangan']) . "')";
-                mysqli_query($conn, $insert_detail);
+                if (!mysqli_query($conn, $insert_detail)) {
+                    throw new RuntimeException('Gagal menyimpan rincian pembayaran.');
+                }
                 $last_insert_id = mysqli_insert_id($conn);
             }
 
@@ -199,7 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             ];
 
             $success = true;
-        } catch (Exception $e) {
+        } catch (Throwable $e) {
             mysqli_rollback($conn);
             $errors[] = 'Gagal menyimpan pembayaran: ' . $e->getMessage();
         }
@@ -207,14 +203,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 }
 
 // Get classes
-$kelas_list = mysqli_query($conn, "SELECT id_kelas, nama_kelas FROM kelas ORDER BY nama_kelas");
+$class_scope = paymentClassScope('id_kelas');
+$santri_scope = paymentClassScope();
+$kelas_list = mysqli_query($conn, "SELECT id_kelas, nama_kelas FROM kelas WHERE $class_scope ORDER BY nama_kelas");
 
 // Get students
 $siswa_list = mysqli_query($conn, "
     SELECT s.id_santri, s.nama, s.id_kelas, k.nama_kelas
     FROM santri s
     JOIN kelas k ON s.id_kelas = k.id_kelas
-    WHERE s.status = 'active'
+    WHERE s.status = 'active' AND $santri_scope
     ORDER BY k.nama_kelas, s.nama
 ");
 
@@ -248,13 +246,14 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
 </header>
 
 <div class="container-xl px-4 mt-4">
+    <?php paymentScopeNotice(); ?>
 
     <?php if (!empty($errors)): ?>
         <script>
             Swal.fire({
                 icon: 'error',
                 title: 'Terjadi Kesalahan!',
-                html: '<?php echo addslashes(implode('<br>', $errors)); ?>',
+                text: <?php echo json_encode(implode("\n", $errors), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
                 showConfirmButton: true
             });
         </script>
@@ -281,6 +280,7 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
                 </div>
                 <div class="card-body">
                     <form method="POST" action="" id="formPembayaranBatch">
+                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars(paymentCsrfToken()); ?>">
                         <div class="form-group">
                             <label>Mode Pembayaran <span class="text-danger">*</span></label>
                             <select name="mode" id="modeSelect" class="form-control" required>
@@ -291,7 +291,7 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
                         <div class="form-group">
                             <label>Pilih Kelas</label>
                             <select id="kelasSelect" class="form-control">
-                                <option value="">-- Semua Kelas --</option>
+                                <option value="">-- Semua Kelas yang Diizinkan --</option>
                                 <?php while ($kls = mysqli_fetch_assoc($kelas_list)): ?>
                                     <option value="<?php echo $kls['id_kelas']; ?>" <?php echo $selected_kelas == $kls['id_kelas'] ? 'selected' : ''; ?>>
                                         <?php echo htmlspecialchars($kls['nama_kelas']); ?>
@@ -356,7 +356,7 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
                 </div>
                 <div class="card-body">
                     <?php
-                    $todayCountQuery = "SELECT COUNT(*) as jumlah, COALESCE(SUM(jumlah_bayar), 0) as total FROM pembayaran WHERE DATE(tgl_bayar) = CURDATE()";
+                    $todayCountQuery = "SELECT COUNT(*) as jumlah, COALESCE(SUM(jumlah_bayar), 0) as total FROM pembayaran p JOIN santri s ON s.id_santri = p.id_santri WHERE DATE(p.tgl_bayar) = CURDATE() AND $santri_scope";
                     $today = mysqli_fetch_assoc(mysqli_query($conn, $todayCountQuery));
                     ?>
                     <p class="mb-1"><strong>Transaksi:</strong> <?php echo $today['jumlah']; ?></p>
