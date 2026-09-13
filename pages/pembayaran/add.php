@@ -249,27 +249,22 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
     <?php paymentScopeNotice(); ?>
 
     <?php if (!empty($errors)): ?>
-        <script>
-            Swal.fire({
-                icon: 'error',
-                title: 'Terjadi Kesalahan!',
-                text: <?php echo json_encode(implode("\n", $errors), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
-                showConfirmButton: true
-            });
-        </script>
+        <div class="alert alert-danger" role="alert">
+            <strong>Pembayaran belum tersimpan.</strong>
+            <?php foreach ($errors as $error): ?>
+                <div><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
+            <?php endforeach; ?>
+        </div>
     <?php endif; ?>
 
     <?php if ($success && $success_info): ?>
-        <script>
-            Swal.fire({
-                icon: 'success',
-                title: 'Pembayaran Berhasil!',
-                html: '<p>Pembayaran untuk <strong><?php echo addslashes(htmlspecialchars($success_info['nama'])); ?></strong> (<?php echo addslashes(htmlspecialchars($success_info['nama_kelas'])); ?>) berhasil disimpan.</p><p>Jumlah item: <strong><?php echo (int) $success_info['jumlah_item']; ?></strong></p><p>Total: <strong><?php echo addslashes(formatRupiah($success_info['total'])); ?></strong></p><p class="text-muted">Bukti pembayaran bisa dicetak per item di riwayat pembayaran.</p>',
-                showConfirmButton: true,
-                confirmButtonText: 'Tutup',
-                confirmButtonColor: '#3085d6'
-            });
-        </script>
+        <div class="alert alert-success" role="status">
+            <strong>Pembayaran berhasil disimpan.</strong>
+            <?php echo htmlspecialchars($success_info['nama'] . ' - ' . $success_info['nama_kelas']); ?>:
+            <?php echo (int) $success_info['jumlah_item']; ?> item,
+            total <?php echo formatRupiah($success_info['total']); ?>.
+            <a href="index.php">Lihat riwayat pembayaran</a>
+        </div>
     <?php endif; ?>
 
     <div class="row">
@@ -370,6 +365,11 @@ $bulan_list = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', '
 <?php
 $extra_js = '
 <script>
+function escapePaymentHtml(value) {
+    const element = document.createElement("span");
+    element.textContent = String(value == null ? "" : value);
+    return element.innerHTML;
+}
 const bulanList = ' . json_encode($bulan_list) . ';
 
 function buildBulanOptions(selected) {
@@ -421,7 +421,7 @@ function renderTagihan(items, mode) {
                     <div class="custom-control custom-checkbox mb-2">
                         <input type="checkbox" class="custom-control-input item-check" id="check_${item.id_iuran}" name="pilih_item[${item.id_iuran}]" value="1" data-id="${item.id_iuran}">
                         <label class="custom-control-label font-weight-bold" for="check_${item.id_iuran}">
-                            ${item.nama_iuran} (${isBulanan ? "Bulanan" : "Tahunan"})
+                            ${escapePaymentHtml(item.nama_iuran)} (${isBulanan ? "Bulanan" : "Tahunan"})
                         </label>
                     </div>
                     <div class="small text-muted mb-2">Nominal tagihan: ${formatRupiahJs(item.nominal)} | Sudah bayar periode default: ${formatRupiahJs(item.sudah_bayar)} | Sisa: ${formatRupiahJs(item.sisa_tagihan)}</div>
@@ -478,7 +478,9 @@ function renderTagihan(items, mode) {
     });
 }
 
+let tagihanRequestId = 0;
 function loadTagihan() {
+    const requestId = ++tagihanRequestId;
     const siswaSelect = document.getElementById("siswaSelect");
     const mode = document.getElementById("modeSelect").value || "tahunan";
     const id_santri = siswaSelect.value;
@@ -492,18 +494,21 @@ function loadTagihan() {
         return;
     }
 
-    document.getElementById("infoSiswa").innerHTML = `<p><strong>Nama:</strong> ${nama}</p><p><strong>Kelas:</strong> ${kelas || "-"}</p>`;
+    document.getElementById("infoSiswa").innerHTML = `<p><strong>Nama:</strong> ${escapePaymentHtml(nama)}</p><p><strong>Kelas:</strong> ${escapePaymentHtml(kelas || "-")}</p>`;
 
+    document.getElementById("tagihanContainer").textContent = "Memuat tagihan...";
     fetch("../../api/get_santri_iuran.php?id=" + encodeURIComponent(id_santri) + "&mode=" + encodeURIComponent(mode))
         .then(response => response.json())
         .then(data => {
+            if (requestId !== tagihanRequestId) return;
             if (data.status === "success" && Array.isArray(data.data)) {
                 renderTagihan(data.data, mode);
             } else {
-                document.getElementById("tagihanContainer").innerHTML = `<div class="text-danger">${data.message || "Gagal memuat tagihan."}</div>`;
+                document.getElementById("tagihanContainer").innerHTML = `<div class="text-danger">${escapePaymentHtml(data.message || "Gagal memuat tagihan.")}</div>`;
             }
         })
         .catch(() => {
+            if (requestId !== tagihanRequestId) return;
             document.getElementById("tagihanContainer").innerHTML = "<div class=\"text-danger\">Gagal memuat informasi tagihan.</div>";
         });
 }
@@ -538,14 +543,13 @@ document.getElementById("formPembayaranBatch").addEventListener("submit", functi
     const checked = document.querySelectorAll(".item-check:checked").length;
     if (checked === 0) {
         e.preventDefault();
-        Swal.fire({
-            icon: "warning",
-            title: "Pilih Tagihan",
-            text: "Pilih minimal 1 item tagihan yang akan dibayar."
-        });
+        window.alert("Pilih minimal 1 item tagihan yang akan dibayar.");
     }
 });
 
+document.getElementById("formPembayaranBatch").addEventListener("reset", function() {
+    setTimeout(function() { filterSantriByKelas(); loadTagihan(); }, 0);
+});
 filterSantriByKelas();
 
 if (document.getElementById("siswaSelect").value) {
