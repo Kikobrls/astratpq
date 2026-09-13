@@ -569,4 +569,116 @@ function getSantriYearlyProgress($id_santri, $year = null)
         'tahun' => $year ?: (int)date('Y'),
     ];
 }
+/** Return the live role, so disabled/deleted accounts cannot keep using a session. */
+function paymentUserRole()
+{
+    global $conn;
+    if (empty($_SESSION['login']) || empty($_SESSION['id_user'])) {
+        return '';
+    }
+    $id = (int) $_SESSION['id_user'];
+    $result = mysqli_query($conn, "SELECT level FROM users WHERE id_user = $id AND status = 'active'");
+    $user = mysqli_fetch_assoc($result);
+    return $user['level'] ?? '';
+}
+
+function requirePaymentAccess($json = false)
+{
+    $role = paymentUserRole();
+    if (!in_array($role, ['admin', 'bendahara'], true)) {
+        $status = empty($_SESSION['login']) ? 401 : 403;
+        if ($json) {
+            jsonResponse(['status' => 'error', 'message' => 'Anda tidak memiliki akses pembayaran.'], $status);
+        }
+        http_response_code($status);
+        exit('Anda tidak memiliki akses pembayaran. Silakan login dengan akun admin atau bendahara aktif.');
+    }
+    $_SESSION['level'] = $role;
+}
+
+/** SQL column must be a trusted application identifier, never request input. */
+function paymentClassScope($column = 's.id_kelas')
+{
+    if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_.]*$/', $column)) {
+        throw new InvalidArgumentException('Invalid class column');
+    }
+    $role = paymentUserRole();
+    if ($role === 'admin') {
+        return '1=1';
+    }
+    // Fail closed before migration and when no classes have been assigned.
+    if ($role !== 'bendahara' || !appTableExists('bendahara_kelas')) {
+        return '1=0';
+    }
+    $id = (int) $_SESSION['id_user'];
+    return "$column IN (SELECT bk.id_kelas FROM bendahara_kelas bk WHERE bk.id_user = $id)";
+}
+
+function paymentSantriAllowed($id_santri, $activeOnly = true)
+{
+    global $conn;
+    $id = (int) $id_santri;
+    $scope = paymentClassScope();
+    $active = $activeOnly ? " AND s.status = 'active'" : '';
+    $result = mysqli_query($conn, "SELECT s.id_santri FROM santri s WHERE s.id_santri = $id AND $scope $active");
+    return mysqli_num_rows($result) === 1;
+}
+
+/** Use the same active fee assignment for individual and collective payments. */
+function paymentSantriFees($id_santri)
+{
+    global $conn;
+    $id = (int) $id_santri;
+    if (!paymentSantriAllowed($id)) {
+        return [];
+    }
+    $period = appColumnExists('iuran', 'periode_tipe') ? "IFNULL(b.periode_tipe, 'bulanan')" : "'bulanan'";
+    if (appTableExists('santri_iuran')) {
+        $sql = "SELECT b.*, $period AS periode_tipe FROM santri_iuran sb
+                JOIN iuran b ON b.id_iuran = sb.id_iuran
+                WHERE sb.id_santri = $id AND sb.is_active = 1";
+    } else {
+        $sql = "SELECT b.*, $period AS periode_tipe FROM santri s
+                JOIN iuran b ON b.id_iuran = s.id_iuran WHERE s.id_santri = $id";
+    }
+    $fees = [];
+    $result = mysqli_query($conn, $sql);
+    while ($row = mysqli_fetch_assoc($result)) {
+        $fees[(int) $row['id_iuran']] = $row;
+    }
+    return $fees;
+}
+
+function paymentCsrfToken()
+{
+    if (empty($_SESSION['payment_csrf'])) {
+        $_SESSION['payment_csrf'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['payment_csrf'];
+}
+
+function paymentCsrfValid()
+{
+    $token = $_POST['csrf_token'] ?? '';
+    return is_string($token) && isset($_SESSION['payment_csrf'])
+        && hash_equals($_SESSION['payment_csrf'], $token);
+}
+
+function paymentScopeNotice()
+{
+    if (($_SESSION['level'] ?? '') !== 'bendahara') {
+        return;
+    }
+    global $conn;
+    $scope = paymentClassScope('id_kelas');
+    $result = mysqli_query($conn, "SELECT nama_kelas FROM kelas WHERE $scope ORDER BY nama_kelas");
+    $names = [];
+    while ($row = mysqli_fetch_assoc($result)) {
+        $names[] = $row['nama_kelas'];
+    }
+    $message = $names
+        ? 'Kelas tugas Anda: ' . implode(', ', $names) . '. Pembayaran hanya untuk santri di kelas tersebut dan iuran aktif yang ditetapkan admin.'
+        : 'Belum ada kelas yang ditugaskan. Hubungi admin untuk mengatur kelas Anda melalui Data Pengguna.';
+    echo '<div class="alert alert-info" role="status">' . htmlspecialchars($message, ENT_QUOTES, 'UTF-8') . '</div>';
+}
 ?>
