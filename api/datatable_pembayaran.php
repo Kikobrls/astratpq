@@ -16,16 +16,7 @@ require_once '../config/database.php';
 require_once '../config/app.php';
 require_once '../includes/DataTablesServerSide.php';
 
-if (!isset($_SESSION['login'])) {
-    http_response_code(401);
-    echo json_encode(['error' => 'Unauthorized']);
-    exit;
-}
-if (($_SESSION['level'] ?? '') === 'kepala_tpq') {
-    http_response_code(403);
-    echo json_encode(['error' => 'Forbidden']);
-    exit;
-}
+requirePaymentAccess(true);
 
 // --- same fixed filters as the page (bulan/tahun as a date range so
 // idx_pembayaran_tgl_bayar can be used, plus optional kelas/iuran) ---
@@ -41,6 +32,7 @@ $periode_end = date('Y-m-d', strtotime($periode_start . ' +1 month'));
 
 $where = "p.tgl_bayar >= '" . mysqli_real_escape_string($conn, $periode_start) . "'"
     . " AND p.tgl_bayar < '" . mysqli_real_escape_string($conn, $periode_end) . "'";
+$where .= " AND " . paymentClassScope();
 if ($filter_kelas > 0) {
     $where .= " AND s.id_kelas = $filter_kelas";
 }
