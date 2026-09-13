@@ -12,10 +12,7 @@ if (session_status() === PHP_SESSION_NONE) {
 require_once '../config/database.php';
 require_once '../config/app.php';
 
-if (!isset($_SESSION['login'])) {
-    echo json_encode(['status' => 'error', 'message' => 'Unauthorized']);
-    exit;
-}
+requirePaymentAccess(true);
 
 if (!isset($_GET['id'])) {
     echo json_encode(['status' => 'error', 'message' => 'Missing ID']);
@@ -28,32 +25,15 @@ if ($id_santri <= 0) {
     exit;
 }
 
+if (!paymentSantriAllowed($id_santri)) {
+    jsonResponse(['status' => 'error', 'message' => 'Santri tidak aktif atau kelas tidak ditugaskan kepada Anda.'], 403);
+}
 $items = [];
-$hasPeriodeTipe = appColumnExists('iuran', 'periode_tipe');
-$periodeExpr = $hasPeriodeTipe ? "IFNULL(b.periode_tipe, 'bulanan')" : "'bulanan'";
 $mode = isset($_GET['mode']) ? strtolower(sanitize($_GET['mode'])) : 'tahunan';
 if ($mode !== 'bulanan' && $mode !== 'tahunan') {
     $mode = 'tahunan';
 }
-
-if (appTableExists('santri_iuran')) {
-    $query = "SELECT sb.id_iuran, b.nama_iuran, b.tahun, b.nominal, $periodeExpr as periode_tipe
-              FROM santri_iuran sb
-              JOIN iuran b ON sb.id_iuran = b.id_iuran
-              WHERE sb.id_santri = '$id_santri' AND sb.is_active = 1
-              ORDER BY b.nama_iuran ASC, b.tahun DESC";
-} else {
-    // Fallback legacy schema
-    $query = "SELECT b.id_iuran, b.nama_iuran, b.tahun, b.nominal,
-                     'bulanan' as periode_tipe
-              FROM santri s
-              JOIN iuran b ON s.id_iuran = b.id_iuran
-              WHERE s.id_santri = '$id_santri'";
-}
-
-$result = mysqli_query($conn, $query);
-
-while ($row = mysqli_fetch_assoc($result)) {
+foreach (paymentSantriFees($id_santri) as $row) {
     $periode_tipe = $row['periode_tipe'] === 'tahunan' ? 'tahunan' : 'bulanan';
     if ($periode_tipe !== $mode) {
         continue;
