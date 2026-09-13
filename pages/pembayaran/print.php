@@ -7,10 +7,8 @@ session_start();
 require_once '../../config/database.php';
 require_once '../../config/app.php';
 
-if (!isset($_SESSION['login'])) {
-    header('Location: ../../login.php');
-    exit;
-}
+requirePaymentAccess();
+$scope = paymentClassScope();
 
 $id_pembayaran = isset($_GET['id']) ? (int) sanitize($_GET['id']) : 0;
 
@@ -19,13 +17,13 @@ if ($id_pembayaran <= 0) {
 }
 
 $payment = mysqli_fetch_assoc(mysqli_query($conn, "
-    SELECT p.*, s.nama, k.nama_kelas, g.nama_petugas as nama_petugas, b.nama_iuran
+    SELECT p.*, s.nama, k.nama_kelas, g.nama as nama_petugas, b.nama_iuran
     FROM pembayaran p
     JOIN santri s ON p.id_santri = s.id_santri
     JOIN kelas k ON s.id_kelas = k.id_kelas
-    JOIN petugas g ON p.id_petugas = g.id_petugas
+    LEFT JOIN users g ON p.id_user = g.id_user
     JOIN iuran b ON p.id_iuran = b.id_iuran
-    WHERE p.id_pembayaran = '$id_pembayaran'
+    WHERE p.id_pembayaran = '$id_pembayaran' AND $scope
 "));
 
 if (!$payment) {
