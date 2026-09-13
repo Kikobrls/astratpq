@@ -12,11 +12,13 @@ require_once '../../config/app.php';
 require_once '../../config/database.php';
 
 // Only admin can manage users
-if (($_SESSION['level'] ?? '') !== 'admin') {
+if (paymentUserRole() !== 'admin') {
     setFlash('danger', 'Anda tidak memiliki akses ke halaman ini!');
     header("Location: ../../index.php");
     exit;
 }
+
+$has_class_assignments = appTableExists('bendahara_kelas');
 
 // Handle delete - BEFORE any HTML output
 if (isset($_GET['delete'])) {
@@ -38,6 +40,9 @@ if (isset($_GET['delete'])) {
 
 // Handle add/edit - BEFORE any HTML output
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    if (!paymentCsrfValid()) {
+        redirect('index.php', 'danger', 'Sesi formulir tidak valid. Silakan coba lagi.');
+    }
     $id_user = isset($_POST['id_user']) ? (int) $_POST['id_user'] : 0;
     $username = sanitize($_POST['username'] ?? '');
     $nama = sanitize($_POST['nama'] ?? '');
@@ -53,6 +58,31 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
     if ($status !== 'active' && $status !== 'inactive') {
         $status = 'active';
+    }
+
+    $kelas_ids = [];
+    if ($level === 'bendahara') {
+        if (!$has_class_assignments) {
+            redirect('index.php', 'danger', 'Jalankan migrasi 2026_09_13_add_bendahara_kelas.sql terlebih dahulu.');
+        }
+        $posted_kelas = $_POST['kelas_ids'] ?? [];
+        if (!is_array($posted_kelas)) {
+            redirect('index.php', 'danger', 'Pilihan kelas tidak valid.');
+        }
+        foreach ($posted_kelas as $value) {
+            if (!is_scalar($value) || !ctype_digit((string) $value) || (int) $value <= 0) {
+                redirect('index.php', 'danger', 'Pilihan kelas tidak valid.');
+            }
+            $kelas_ids[] = (int) $value;
+        }
+        $kelas_ids = array_values(array_unique($kelas_ids));
+        if ($kelas_ids) {
+            $ids = implode(',', $kelas_ids);
+            $found = mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS total FROM kelas WHERE id_kelas IN ($ids)"));
+            if ((int) $found['total'] !== count($kelas_ids)) {
+                redirect('index.php', 'danger', 'Kelas tidak ditemukan. Muat ulang halaman.');
+            }
+        }
     }
 
     if (empty($username) || empty($nama)) {
@@ -93,17 +123,36 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 $msg = 'diubah';
             }
 
-            if (mysqli_query($conn, $query)) {
-                logActivity("Menyimpan data pengguna ($msg)", 'users', $id_user ?: mysqli_insert_id($conn));
-                setFlash('success', "Data pengguna berhasil $msg!");
-            } else {
-                setFlash('danger', 'Gagal menyimpan data pengguna!');
+            mysqli_begin_transaction($conn);
+            try {
+                if (!mysqli_query($conn, $query)) {
+                    throw new RuntimeException('Gagal menyimpan pengguna.');
+                }
+                $saved_id = $id_user ?: (int) mysqli_insert_id($conn);
+                if ($has_class_assignments) {
+                    if (!mysqli_query($conn, "DELETE FROM bendahara_kelas WHERE id_user = $saved_id")) {
+                        throw new RuntimeException('Gagal memperbarui penugasan.');
+                    }
+                    foreach ($kelas_ids as $kelas_id) {
+                        if (!mysqli_query($conn, "INSERT INTO bendahara_kelas (id_user, id_kelas) VALUES ($saved_id, $kelas_id)")) {
+                            throw new RuntimeException('Gagal menyimpan penugasan.');
+                        }
+                    }
+                }
+                logActivity("Menyimpan pengguna dan penugasan kelas ($msg)", 'users', $saved_id);
+                mysqli_commit($conn);
+                setFlash('success', "Data pengguna berhasil $msg!" . ($level === 'bendahara' && !$kelas_ids ? ' Bendahara belum dapat input pembayaran sampai kelas ditugaskan.' : ''));
+            } catch (Throwable $e) {
+                mysqli_rollback($conn);
+                setFlash('danger', 'Gagal menyimpan pengguna dan kelas. Tidak ada perubahan yang disimpan.');
             }
         }
     }
     header("Location: index.php");
     exit;
 }
+
+$kelas_options = mysqli_query($conn, 'SELECT id_kelas, nama_kelas FROM kelas ORDER BY nama_kelas');
 
 // NOW include header/sidebar - AFTER redirect logic
 $page_title = 'Data Pengguna';
@@ -140,6 +189,10 @@ require_once '../../includes/topbar.php';
 <!-- Begin Page Content -->
 <div class="container-xl px-4 mt-4">
 
+    <?php if (!$has_class_assignments): ?>
+        <div class="alert alert-warning">Pengaturan kelas belum siap. Jalankan file
+            <code>migrations/2026_09_13_add_bendahara_kelas.sql</code> melalui phpMyAdmin terlebih dahulu.</div>
+    <?php endif; ?>
     <!-- DataTales -->
     <div class="card shadow mb-4">
         <div class="card-header py-3">
@@ -188,6 +241,7 @@ require_once '../../includes/topbar.php';
             <form method="POST" action="">
                 <div class="modal-body">
                     <input type="hidden" name="id_user" id="id_user">
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars(paymentCsrfToken()); ?>">
                     <div class="row">
                         <div class="col-md-6">
                             <div class="form-group mb-3">
@@ -242,6 +296,20 @@ require_once '../../includes/topbar.php';
                             </div>
                         </div>
                     </div>
+                    <fieldset id="kelasAssignment" class="border rounded p-3 mb-3">
+                        <legend class="h6">Kelas yang boleh dikelola bendahara</legend>
+                        <p class="small text-muted">Centang satu atau beberapa kelas. Tanpa pilihan, bendahara tidak dapat input pembayaran. Admin tetap dapat mengelola semua kelas.</p>
+                        <?php while ($kelas = mysqli_fetch_assoc($kelas_options)): ?>
+                            <div class="form-check">
+                                <input class="form-check-input kelas-assignment" type="checkbox" name="kelas_ids[]"
+                                    id="kelas_<?php echo (int) $kelas['id_kelas']; ?>" value="<?php echo (int) $kelas['id_kelas']; ?>">
+                                <label class="form-check-label" for="kelas_<?php echo (int) $kelas['id_kelas']; ?>"><?php echo htmlspecialchars($kelas['nama_kelas']); ?></label>
+                            </div>
+                        <?php endwhile; ?>
+                        <?php if (mysqli_num_rows($kelas_options) === 0): ?>
+                            <p class="text-muted mb-0">Belum ada kelas. Tambahkan melalui Data Kelas.</p>
+                        <?php endif; ?>
+                    </fieldset>
                 </div>
                 <div class="modal-footer">
                     <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Batal</button>
@@ -257,6 +325,11 @@ $extra_js = '
 <script src="https://cdn.jsdelivr.net/npm/datatables.net@2/js/dataTables.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/datatables.net-bs5@2/js/dataTables.bootstrap5.min.js"></script>
 <script>
+function toggleKelasAssignment() {
+    const enabled = document.getElementById("level").value === "bendahara";
+    document.getElementById("kelasAssignment").hidden = !enabled;
+    document.querySelectorAll(".kelas-assignment").forEach(function (el) { el.disabled = !enabled; });
+}
 function resetForm() {
     document.getElementById("modalTitle").textContent = "Tambah Pengguna";
     document.getElementById("id_user").value = "";
@@ -270,6 +343,8 @@ function resetForm() {
     document.getElementById("no_telp").value = "";
     document.getElementById("level").value = "bendahara";
     document.getElementById("status").value = "active";
+    document.querySelectorAll(".kelas-assignment").forEach(function (el) { el.checked = false; });
+    toggleKelasAssignment();
 }
 
 function editUser(data) {
@@ -285,10 +360,15 @@ function editUser(data) {
     document.getElementById("no_telp").value = data.no_telp || "";
     document.getElementById("level").value = data.level;
     document.getElementById("status").value = data.status;
-    $("#userModal").modal("show");
+    const kelasIds = (data.kelas_ids || []).map(String);
+    document.querySelectorAll(".kelas-assignment").forEach(function (el) { el.checked = kelasIds.includes(el.value); });
+    toggleKelasAssignment();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById("userModal")).show();
 }
 
 $(function () {
+    $("#level").on("change", toggleKelasAssignment);
+    toggleKelasAssignment();
     $("#usersTable").DataTable({
         processing: true,
         serverSide: true,

@@ -21,7 +21,7 @@ if (!isset($_SESSION['login'])) {
     echo json_encode(['error' => 'Unauthorized']);
     exit;
 }
-if (($_SESSION['level'] ?? '') !== 'admin') {
+if (paymentUserRole() !== 'admin') {
     http_response_code(403);
     echo json_encode(['error' => 'Forbidden']);
     exit;
@@ -46,6 +46,15 @@ $queryResult = runServerSideQuery([
     'columns' => $columns,
 ]);
 
+$class_map = [];
+if (appTableExists('bendahara_kelas') && $queryResult['rows']) {
+    $user_ids = implode(',', array_map('intval', array_column($queryResult['rows'], 'id_user')));
+    $assignments = mysqli_query($conn, "SELECT bk.id_user, bk.id_kelas, k.nama_kelas FROM bendahara_kelas bk
+        JOIN kelas k ON k.id_kelas = bk.id_kelas WHERE bk.id_user IN ($user_ids) ORDER BY k.nama_kelas");
+    while ($assignment = mysqli_fetch_assoc($assignments)) {
+        $class_map[(int) $assignment['id_user']][] = $assignment;
+    }
+}
 $no = $queryResult['start'] + 1;
 $data = [];
 foreach ($queryResult['rows'] as $row) {
@@ -60,12 +69,18 @@ foreach ($queryResult['rows'] as $row) {
     $level_text = $row['level'] == 'kepala_tpq' ? 'Kepala TPQ' : ucfirst($row['level']);
     $levelBadge = '<span class="badge bg-' . $badge_color . '">' . $level_text . '</span>';
 
+    if ($row['level'] === 'bendahara') {
+        $class_names = array_column($class_map[$id] ?? [], 'nama_kelas');
+        $levelBadge .= '<br><small>' . htmlspecialchars($class_names ? implode(', ', $class_names) : 'Belum ada kelas') . '</small>';
+    }
+
     $statusBadge = '<span class="badge bg-' . ($row['status'] == 'active' ? 'success' : 'secondary') . '">'
         . ucfirst($row['status']) . '</span>';
 
     // Same payload editUser() in index.php expects (password intentionally omitted).
     $rowJson = htmlspecialchars(json_encode([
         'id_user' => $id,
+        'kelas_ids' => array_map('intval', array_column($class_map[$id] ?? [], 'id_kelas')),
         'username' => $row['username'],
         'nama' => $row['nama'],
         'email' => $row['email'],
