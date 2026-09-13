@@ -1,0 +1,116 @@
+/* ==========================================================================
+   Custom override — Sistem Keuangan TPQ
+   Warna font utama diubah dari abu-abu (#69707a) bawaan SB Admin Pro → hitam.
+   Badge dikecualikan (tetap pakai warna aslinya).
+   File ini di-load SETELAH styles.css, jadi menimpa warna default template.
+   ========================================================================== */
+
+:root {
+    --bs-body-color: #000000;
+    --bs-body-color-rgb: 0, 0, 0;
+    --bs-gray-600: #000000;
+}
+
+body {
+    color: #000000;
+}
+
+/* Teks yang di template aslinya abu-abu → hitam.
+   Dikecualikan: badge (dan isinya), tombol, link, serta teks berwarna
+   semantik (text-primary/success/danger/dll) supaya tetap berwarna. */
+body :not(.badge):not(.badge *):not(.btn):not(.btn *):not(a):not(.text-primary):not(.text-secondary):not(.text-success):not(.text-danger):not(.text-warning):not(.text-info):not(.text-white):not(.text-light):not(i):not(svg) {
+    color: #000000;
+}
+
+/* Pastikan badge benar-benar tidak terpengaruh */
+.badge,
+.badge * {
+    color: revert;
+}
+
+/* ==========================================================================
+   Logo TPQ
+   Template SB Admin Pro memaksa `.topnav .navbar-brand img { height: 0.8rem }`
+   (aturan itu dirancang untuk logo berbentuk teks/wordmark, bukan ikon).
+   Selector di bawah sengaja dibuat lebih spesifik supaya ukurannya menang,
+   dan tingginya dikunci relatif terhadap tinggi topnav (3.625rem).
+
+   Ukuran cukup atur lewat `height` saja — `width: auto` menjaga rasio asli
+   logo, jadi tidak perlu object-fit / crop apa pun.
+   ========================================================================== */
+.topnav .navbar-brand img.topnav-logo {
+    height: 2.25rem;
+    width: auto;
+}
+
+/* ==========================================================================
+   Server-side DataTables — anti flash-of-unstyled-table
+   Halaman yang tabelnya dimuat via AJAX (Data Santri, Pembayaran,
+   Jurnal Umum) membungkus <table> di dalam .dt-loading-wrap dan taruh
+   .dt-loading-overlay tepat sebelum .table-responsive di HTML statis.
+   Karena overlay ada di HTML sejak awal (bukan ditambahkan oleh JS),
+   overlay itu langsung menutupi tabel polos pada render pertama —
+   sebelum DataTables sempat menyala. Baru dibuka sekali (fade out)
+   lewat callback initComplete() saat tabel FINAL sudah siap, jadi user
+   cuma pernah melihat SATU desain, bukan tabel polos lalu berubah jadi
+   tabel DataTables.
+   ========================================================================== */
+.dt-loading-wrap {
+    position: relative;
+    min-height: 220px;
+}
+
+.dt-loading-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+}
+
+/* ==========================================================================
+   Table border — Sistem Keuangan TPQ
+   Terapkan perbaikan yang sama dengan Sistem Absensi:
+   - Default Bootstrap .table-bordered membuat garis tebal (border 2px di
+     header/footer + 1px di sel) → ditipiskan jadi 1px abu muda seragam.
+   - Garis 2px HITAM di bawah header berasal dari aturan template
+     `.table > :not(:first-child) { border-top: 2px solid currentColor; }`
+     (currentColor = teks hitam). Ditimpa jadi 1px abu muda seragam.
+   - Hilangkan outline default Bootstrap (:focus-visible, 3px) pada tabel
+     agar tidak tampil sebagai garis tebal di sekitar tabel.
+   ========================================================================== */
+.table {
+    border-color: #e3e6ec;
+}
+.table-bordered,
+.table-bordered th,
+.table-bordered td {
+    border-width: 1px;
+    border-color: #e3e6ec;
+}
+.table thead th,
+.table tfoot th {
+    border-top-width: 1px;
+    border-bottom-width: 1px;
+}
+.table,
+.table-bordered,
+.dataTable-table,
+.table thead th,
+.table tbody td,
+.table * {
+    outline: none !important;
+}
+.table:focus,
+.table-bordered:focus,
+.table *:focus {
+    outline: none !important;
+    box-shadow: none !important;
+}
+.table > :not(:first-child),
+.dataTable-table > :not(:first-child) {
+    border-top: 1px solid #e3e6ec !important;
+}
+
